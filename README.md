@@ -5,7 +5,7 @@
 WASMを採用した構成によりサーバーにファイルをアップロードせずにお使いいただけます。
 
 ## デモ
-https://acoustoikawalab.github.io/WSD-converter/
+https://acoustoikawalab.github.io/WSD_Converter/
 ![ホーム画面](./rdm_img/home.png)
 
 ## 機能
