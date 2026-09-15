@@ -1,0 +1,21 @@
+# Node
+node_modules/
+dist/
+
+# Rust / wasm-pack
+wsd_logic/target/
+# wsd_logic/pkg/ は script.js が import するビルド入力なので追跡する
+
+# OS / editor
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

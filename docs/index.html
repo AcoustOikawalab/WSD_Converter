@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>WSD-Converter</title>
+    <script type="module" crossorigin src="./assets/index-B-jodYXm.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-DrJwbLTY.css">
+  </head>
+  <body>
+    <div class="container" id="mainScreen">
+      <div class="title-container">
+        <h1 class="site-title">
+          WSD-Converter
+          <span style="font-size: 0.4em; opacity: 0.5; margin-left: 0.5rem"
+            >v1.0</span
+          >
+        </h1>
+        <div class="help-icon" data-help="main" title="アプリについて">?</div>
+      </div>
+
+      <!-- タブ -->
+      <div class="tab-container">
+        <div class="tab-slider"></div>
+        <div class="tab active" data-tab="bin">
+          ビットストリーム
+          <div
+            class="help-icon tab-help"
+            data-help="bin"
+            title="binファイルについて"
+          >
+            ?
+          </div>
+        </div>
+        <div class="tab" data-tab="audio-high">
+          DSD音源
+          <div
+            class="help-icon tab-help"
+            data-help="audio-high"
+            title="DSD音源について"
+          >
+            ?
+          </div>
+        </div>
+        <div class="tab disabled" data-tab="audio-common">
+          PCM音源（未対応）
+          <div
+            class="help-icon tab-help"
+            data-help="audio-common"
+            title="PCM音源について"
+          >
+            ?
+          </div>
+        </div>
+      </div>
+
+      <!-- ファイルドロップエリア -->
+      <div class="drop-area-container">
+        <div class="drop-area" id="dropArea">
+          <!-- 初期表示コンテンツ -->
+          <div class="drop-content" id="dropContent">
+            <div class="drop-icon">📁</div>
+            <div class="drop-text">ファイルをドラッグ&ドロップ</div>
+            <div class="drop-or">または</div>
+            <button class="file-select-btn" id="fileSelectBtn">
+              ファイルを選択
+            </button>
+            <input
+              type="file"
+              id="audioFileInput"
+              accept=".bin, .dsf, .dff, .wav, .aif"
+              style="display: none"
+              multiple
+            />
+          </div>
+
+          <!-- ファイルリスト表示コンテンツ -->
+          <div
+            class="file-list-content"
+            id="fileListContent"
+            style="display: none"
+          >
+            <div id="fileList" class="file-list"></div>
+            <button class="add-more-btn" id="addMoreBtn">
+              + ファイルを追加
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <button id="processButton" class="process-btn" disabled>次に進む</button>
+
+      <div id="statusMessage" class="message"></div>
+      <a id="downloadLink" class="download-link" style="display: none"
+        >ダウンロード</a
+      >
+    </div>
+
+    <!-- メタデータ入力画面 -->
+    <div class="metadata-screen" id="metadataScreen">
+      <!-- ナビゲーションヘッダー -->
+      <div class="nav-header">
+        <div class="nav-btn nav-back" id="backBtnMeta" title="戻る"></div>
+        <div class="nav-btn nav-home" id="homeBtnMeta" title="最初から"></div>
+      </div>
+
+      <!-- チェックボックスと処理ボタン -->
+      <div class="checkbox-container">
+        <label class="checkbox-label">
+          <input type="checkbox" id="skipMetadata" checked />
+          <span class="checkmark"></span>
+          情報を入力しない
+        </label>
+        <button id="processWithMetadata" class="process-btn">次に進む</button>
+      </div>
+
+      <!-- メタデータフィールド -->
+      <div class="metadata-fields" id="metadataFields">
+        <div class="field-group">
+          <label>タイトル</label>
+          <textarea
+            id="title"
+            class="metadata-input"
+            disabled
+            rows="3"
+            maxlength="128"
+          ></textarea>
+        </div>
+        <div class="field-group">
+          <label>作曲者</label>
+          <textarea
+            id="composer"
+            class="metadata-input"
+            disabled
+            rows="3"
+            maxlength="128"
+          ></textarea>
+        </div>
+        <div class="field-group">
+          <label>作詞者</label>
+          <textarea
+            id="lyricist"
+            class="metadata-input"
+            disabled
+            rows="3"
+            maxlength="128"
+          ></textarea>
+        </div>
+        <div class="field-group">
+          <label>アーティスト</label>
+          <textarea
+            id="artist"
+            class="metadata-input"
+            disabled
+            rows="3"
+            maxlength="128"
+          ></textarea>
+        </div>
+        <div class="field-group">
+          <label>アルバム</label>
+          <textarea
+            id="album"
+            class="metadata-input"
+            disabled
+            rows="3"
+            maxlength="128"
+          ></textarea>
+        </div>
+        <div class="field-group">
+          <label>ジャンル</label>
+          <textarea
+            id="genre"
+            class="metadata-input"
+            disabled
+            rows="2"
+            maxlength="32"
+          ></textarea>
+        </div>
+        <div class="field-group">
+          <label>収録日時</label>
+          <textarea
+            id="recordDate"
+            class="metadata-input"
+            disabled
+            rows="3"
+            maxlength="128"
+          ></textarea>
+        </div>
+        <div class="field-group">
+          <label>収録場所</label>
+          <textarea
+            id="recordLocation"
+            class="metadata-input"
+            disabled
+            rows="2"
+            maxlength="32"
+          ></textarea>
+        </div>
+        <div class="field-group">
+          <label>コメント</label>
+          <textarea
+            id="comment"
+            class="metadata-input"
+            disabled
+            rows="3"
+            maxlength="512"
+          ></textarea>
+        </div>
+        <div class="field-group">
+          <label>その他</label>
+          <textarea
+            id="other"
+            class="metadata-input"
+            disabled
+            rows="3"
+            maxlength="512"
+          ></textarea>
+        </div>
+      </div>
+
+      <div id="metadataStatusMessage" class="message"></div>
+      <a id="metadataDownloadLink" class="download-link" style="display: none"
+        >ダウンロード</a
+      >
+    </div>
+
+    <!-- 音声パラメータ設定画面 -->
+    <div class="metadata-screen" id="audioParamsScreen">
+      <!-- ナビゲーションヘッダー -->
+      <div class="nav-header">
+        <div class="nav-btn nav-back" id="backBtnAudio" title="戻る"></div>
+        <div class="nav-btn nav-home" id="homeBtnAudio" title="最初から"></div>
+      </div>
+
+      <div class="title-container">
+        <h2 class="screen-title">音声パラメータ設定</h2>
+        <div
+          class="help-icon"
+          data-help="audio-params"
+          title="音声パラメータについて"
+        >
+          ?
+        </div>
+      </div>
+
+      <div class="metadata-fields">
+        <!-- binファイル用設定 -->
+        <div id="binSettings" class="file-type-settings" style="display: none">
+          <div class="bin-settings-container">
+            <!-- 左側の設定項目 -->
+            <div class="bin-settings-left">
+              <!-- ファイルリストとチャンネル設定 -->
+              <div class="field-group" style="width: 100%; max-width: 100%">
+                <label>チャンネル割り当て設定</label>
+                <div
+                  id="channelConfigList"
+                  class="file-list"
+                  style="
+                    max-height: 30vh;
+                    border: 0.2vh solid #e2e8f0;
+                    border-radius: 1vh;
+                    padding: 1vh;
+                    background: #f8fafc;
+                  "
+                ></div>
+              </div>
+
+              <div class="field-group">
+                <label>標本化周波数</label>
+                <select
+                  id="samplingFrequency"
+                  class="metadata-input wide-select"
+                >
+                  <option value="1411200">1.4MHz (44.1kHz × 32)</option>
+                  <option value="2822400" selected>
+                    2.8MHz (44.1kHz × 64)
+                  </option>
+                  <option value="5644800">5.6MHz (44.1kHz × 128)</option>
+                  <option value="11289600">11.2MHz (44.1kHz × 256)</option>
+                  <option value="1536000">1.5MHz (48kHz × 32)</option>
+                  <option value="3072000">3.0MHz (48kHz × 64)</option>
+                  <option value="6144000">6.1MHz (48kHz × 128)</option>
+                  <option value="12288000">12.2MHz (48kHz × 256)</option>
+                  <option value="other">その他 (手入力)</option>
+                </select>
+                <input
+                  type="number"
+                  id="customSamplingFrequency"
+                  class="metadata-input wide-input"
+                  placeholder="Hzを入力"
+                  style="display: none; margin-top: 1vh"
+                />
+              </div>
+
+              <input type="hidden" id="channelCount" />
+            </div>
+
+            <div class="bin-settings-right">
+              <div class="field-group channel-layout-group">
+                <label>チャンネル配置</label>
+                <div class="channel-layout-wrapper">
+                  <div class="channel-layout-container">
+                    <div class="person-icon">👤</div>
+
+                    <div
+                      class="channel-checkbox-wrapper"
+                      style="--angle: -60deg"
+                    >
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="lf" />
+                        <span>Lf</span>
+                      </label>
+                    </div>
+                    <div
+                      class="channel-checkbox-wrapper"
+                      style="--angle: -30deg"
+                    >
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="lf-middle" />
+                        <span>Lf-m</span>
+                      </label>
+                    </div>
+                    <div class="channel-checkbox-wrapper" style="--angle: 0deg">
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="cf" />
+                        <span>Cf</span>
+                      </label>
+                    </div>
+                    <div
+                      class="channel-checkbox-wrapper"
+                      style="--angle: 30deg"
+                    >
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="rf-middle" />
+                        <span>Rf-m</span>
+                      </label>
+                    </div>
+                    <div
+                      class="channel-checkbox-wrapper"
+                      style="--angle: 60deg"
+                    >
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="rf" />
+                        <span>Rf</span>
+                      </label>
+                    </div>
+                    <div
+                      class="channel-checkbox-wrapper"
+                      style="--angle: 120deg"
+                    >
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="lr" />
+                        <span>Lr</span>
+                      </label>
+                    </div>
+                    <div
+                      class="channel-checkbox-wrapper"
+                      style="--angle: 150deg"
+                    >
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="lr-middle" />
+                        <span>Lr-m</span>
+                      </label>
+                    </div>
+                    <div
+                      class="channel-checkbox-wrapper"
+                      style="--angle: 180deg"
+                    >
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="cr" />
+                        <span>Cr</span>
+                      </label>
+                    </div>
+                    <div
+                      class="channel-checkbox-wrapper"
+                      style="--angle: 210deg"
+                    >
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="rr-middle" />
+                        <span>Rr-m</span>
+                      </label>
+                    </div>
+                    <div
+                      class="channel-checkbox-wrapper"
+                      style="--angle: 240deg"
+                    >
+                      <label class="channel-checkbox">
+                        <input type="checkbox" value="rr" />
+                        <span>Rr</span>
+                      </label>
+                    </div>
+
+                    <!-- LFE（別方向に配置） -->
+                    <div class="lfe-checkbox-wrapper">
+                      <label class="channel-checkbox lfe-checkbox">
+                        <input type="checkbox" value="lfe" />
+                        <span>LFE</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- wav/aif用設定 -->
+        <div
+          id="audioSettings"
+          class="file-type-settings"
+          style="display: none"
+        >
+          <div class="audio-settings-row">
+            <div class="field-group sample-rate-group">
+              <label>現在の標本化周波数 (Hz)</label>
+              <input
+                type="number"
+                id="currentSampleRate"
+                class="metadata-input sample-rate-input"
+                placeholder="ファイルを選択してください"
+                min="1000"
+                max="192000"
+                step="1"
+              />
+            </div>
+
+            <div class="field-group multiplier-group">
+              <label>標本化周波数倍率</label>
+              <select id="samplingMultiplier" class="metadata-input">
+                <option value="32">32倍</option>
+                <option value="64" selected>64倍</option>
+                <option value="128">128倍</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div
+        style="
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          margin-top: 3vh;
+        "
+      >
+        <button class="process-button" id="processWithAudioParams">
+          処理を開始
+        </button>
+        <div id="audioParamsStatusMessage" class="message"></div>
+        <a
+          id="audioParamsDownloadLink"
+          class="download-link"
+          style="display: none"
+          >ダウンロード</a
+        >
+      </div>
+    </div>
+
+    <!-- ヘルプモーダル -->
+    <div id="helpModal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="modalTitle">ヘルプ</h3>
+          <span class="close-btn" id="closeModal">&times;</span>
+        </div>
+        <div class="modal-body">
+          <p id="modalText">ここにヘルプテキストが表示されます。</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- フッター -->
+    <div class="footer">
+      &copy; 2025 Acoustic Lab. All rights reserved.
+      <span style="margin: 0 8px; color: #ccc">|</span>
+      Developed by Yuta Gomi.
+
+      <div style="font-size: 0.8em; margin-top: 4px; opacity: 0.8">
+        Based on WSD Specification by
+        <a href="http://www.acoust.rise.waseda.ac.jp/1bitcons/"
+          >1-bit Audio Consortium</a
+        >.
+      </div>
+    </div>
+
+  </body>
+</html>
