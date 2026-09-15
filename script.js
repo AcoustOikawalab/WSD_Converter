@@ -363,6 +363,54 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateCheckboxDisplay();
   }
 
+  // 変換結果を .wsd としてダウンロードさせる。
+  // ObjectURL は使い終わったら必ず解放する（未解放だとタブを閉じるまでメモリが残る）
+  function downloadResult(resultBytes, linkElement, sourceFileName) {
+    const blob = new Blob([resultBytes], {
+      type: "application/octet-stream",
+    });
+    const url = URL.createObjectURL(blob);
+    const baseName = sourceFileName.replace(/\.[^/.]+$/, "");
+
+    linkElement.href = url;
+    linkElement.download = `processed_${baseName}.wsd`;
+    linkElement.click();
+
+    // click() がダウンロードを開始したあとに解放する
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // メタデータ入力欄を集めて Rust 側のフィールド名に変換する
+  function collectMetadata() {
+    const metadata = {};
+
+    // HTMLのID -> Rustのフィールド名(camelCase) への変換マップ
+    const idMap = {
+      title: "title",
+      composer: "composer",
+      lyricist: "songWriter",
+      artist: "artist",
+      album: "album",
+      genre: "genre",
+      recordDate: "dateTime",
+      recordLocation: "location",
+      comment: "comment",
+      other: "userSpecific",
+    };
+
+    if (!skipMetadata.checked) {
+      metadataInputs.forEach((input) => {
+        // disabledでない、かつ値が入っているものだけ送る
+        if (!input.disabled && input.value.trim()) {
+          const rustKey = idMap[input.id] || input.id;
+          metadata[rustKey] = input.value.trim();
+        }
+      });
+    }
+
+    return metadata;
+  }
+
   function formatFileSize(bytes) {
     if (bytes === 0) return "0 B";
     const k = 1024;
@@ -627,20 +675,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       const resultBytes = process_audio_wasm(buffer, metadataStr, paramsStr);
 
-      // ダウンロードリンク作成
-      const blob = new Blob([resultBytes], {
-        type: "application/octet-stream",
-      });
-      const url = URL.createObjectURL(blob);
-
-      downloadLink.href = url;
-      downloadLink.download = `processed_${file.name.replace(
-        /\.[^/.]+$/,
-        ""
-      )}.wsd`;
-
-      // 自動ダウンロード
-      downloadLink.click();
+      downloadResult(resultBytes, downloadLink, file.name);
 
       statusMessage.textContent = "処理完了！";
     } catch (e) {
@@ -809,31 +844,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
       }
 
-      const metadata = {};
-
-      // HTMLのID -> Rustのフィールド名(camelCase) への変換マップ
-      const idMap = {
-        title: "title",
-        composer: "composer",
-        lyricist: "songWriter",
-        artist: "artist",
-        album: "album",
-        genre: "genre",
-        recordDate: "dateTime",
-        recordLocation: "location",
-        comment: "comment",
-        other: "userSpecific",
-      };
-
-      if (!skipMetadata.checked) {
-        metadataInputs.forEach((input) => {
-          // disabledでない、かつ値が入っているものだけ送る
-          if (!input.disabled && input.value.trim()) {
-            const rustKey = idMap[input.id] || input.id;
-            metadata[rustKey] = input.value.trim();
-          }
-        });
-      }
+      const metadata = collectMetadata();
       const metadataStr = JSON.stringify(metadata);
 
       const paramsStr = JSON.stringify(audioParams);
@@ -846,19 +857,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         paramsStr
       );
 
-      // 結果ダウンロード
-      const blob = new Blob([resultBytes], {
-        type: "application/octet-stream",
-      });
-      const url = window.URL.createObjectURL(blob);
-
-      // ファイル名生成 (processed_元の名前.wsd)
-      const baseName = firstFile.name.replace(/\.[^/.]+$/, "");
-      audioParamsDownloadLink.href = url;
-      audioParamsDownloadLink.download = `processed_${baseName}.wsd`;
-
-      // 自動ダウンロード
-      audioParamsDownloadLink.click();
+      downloadResult(resultBytes, audioParamsDownloadLink, firstFile.name);
 
       audioParamsStatusMessage.textContent = "処理完了！";
     } catch (error) {
@@ -887,32 +886,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     processWithMetadata.disabled = true;
 
     try {
-      // メタデータ収集
-      const metadata = {};
-
-      // HTMLのID -> Rustのフィールド名への変換マップ
-      const idMap = {
-        title: "title",
-        composer: "composer",
-        lyricist: "songWriter",
-        artist: "artist",
-        album: "album",
-        genre: "genre",
-        recordDate: "dateTime",
-        recordLocation: "location",
-        comment: "comment",
-        other: "userSpecific",
-      };
-
-      if (!skipMetadata.checked) {
-        metadataInputs.forEach((input) => {
-          // disabledでない、かつ値が入っているものだけ送る
-          if (!input.disabled && input.value.trim()) {
-            const rustKey = idMap[input.id] || input.id;
-            metadata[rustKey] = input.value.trim();
-          }
-        });
-      }
+      const metadata = collectMetadata();
 
       const fileBuffer = new Uint8Array(await selectedFile.arrayBuffer());
       const metadataStr = JSON.stringify(metadata);
@@ -924,20 +898,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         paramsStr
       );
 
-      // 結果のダウンロードリンク作成
-      const blob = new Blob([resultBytes], {
-        type: "application/octet-stream",
-      });
-      const url = URL.createObjectURL(blob);
-
-      metadataDownloadLink.href = url;
-      metadataDownloadLink.download = `processed_${selectedFile.name.replace(
-        /\.[^/.]+$/,
-        ""
-      )}.wsd`;
-
-      // 自動ダウンロード
-      metadataDownloadLink.click();
+      downloadResult(resultBytes, metadataDownloadLink, selectedFile.name);
 
       metadataStatusMessage.textContent = "Rustによる処理が完了しました！";
     } catch (error) {
