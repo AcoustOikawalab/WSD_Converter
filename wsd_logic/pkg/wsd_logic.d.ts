@@ -2,7 +2,7 @@
 /* eslint-disable */
 
 /**
- * ファイルからメタデータを抽出する関数 (JSから呼ばれる)
+ * ファイルからメタデータを抽出する関数
  */
 export function get_file_metadata_wasm(file_data: Uint8Array): any;
 

@@ -171,7 +171,7 @@ if (!('encodeInto' in cachedTextEncoder)) {
 let WASM_VECTOR_LEN = 0;
 
 /**
- * ファイルからメタデータを抽出する関数 (JSから呼ばれる)
+ * ファイルからメタデータを抽出する関数
  * @param {Uint8Array} file_data
  * @returns {any}
  */

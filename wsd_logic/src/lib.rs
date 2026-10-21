@@ -261,19 +261,19 @@ fn create_wsd_file(
     output.extend_from_slice(&[0; 3]);
 
     // Ch_Asn (文字列配列からビットフラグへ)
-    let mut ch_asn_front = 0x01;
+    let mut ch_asn_front = 0x00;
     if let Some(layout) = &params.channel_layout {
         if layout.iter().any(|s| s == "lf") { ch_asn_front |= 1 << 6; }
         if layout.iter().any(|s| s == "lf-middle") { ch_asn_front |= 1 << 5; }
         if layout.iter().any(|s| s == "cf") { ch_asn_front |= 1 << 4; }
         if layout.iter().any(|s| s == "rf-middle") { ch_asn_front |= 1 << 3; }
         if layout.iter().any(|s| s == "rf") { ch_asn_front |= 1 << 2; }
-        if layout.iter().any(|s| s == "lfe") { ch_asn_front |= 1 << 1; }
+        if layout.iter().any(|s| s == "lfe") { ch_asn_front |= 1 << 0; }
     }
     output.push(ch_asn_front);
     output.extend_from_slice(&[0; 2]);
 
-    let mut ch_asn_rear = 0x01;
+    let mut ch_asn_rear = 0x00;
     if let Some(layout) = &params.channel_layout {
         if layout.iter().any(|s| s == "lr") { ch_asn_rear |= 1 << 6; }
         if layout.iter().any(|s| s == "lr-middle") { ch_asn_rear |= 1 << 5; }
@@ -441,5 +441,44 @@ fn decode_text(encoding: u8, data: &[u8]) -> String {
         },
         3 => String::from_utf8_lossy(clean_data).to_string(), // UTF-8
         _ => String::from_utf8_lossy(clean_data).to_string(),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ch_asn(layout: &[&str]) -> (u8, u8) {
+        let params = AudioParams {
+            sampling_frequency: Some(2_822_400),
+            channel_count: Some(layout.len() as u8),
+            channel_layout: Some(layout.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let out = create_wsd_file(&[0; 8], &Metadata::default(), &params).unwrap();
+        (out[48], out[51])
+    }
+
+    // 仕様書 p.7: 2ch は RBP48=44h, RBP51=00h
+    #[test]
+    fn ch_asn_stereo() {
+        assert_eq!(ch_asn(&["lf", "rf"]), (0x44, 0x00));
+    }
+
+    // 仕様書 p.7: 4ch は RBP48=44h, RBP51=44h
+    #[test]
+    fn ch_asn_quad() {
+        assert_eq!(ch_asn(&["lf", "rf", "lr", "rr"]), (0x44, 0x44));
+    }
+
+    // 仕様書 p.7: 5.1ch は RBP48=55h, RBP51=44h
+    #[test]
+    fn ch_asn_surround_5_1() {
+        assert_eq!(ch_asn(&["lf", "cf", "rf", "lfe", "lr", "rr"]), (0x55, 0x44));
+    }
+
+    // 仕様書 p.7: Multiple Mono の Cf は RBP48=10h
+    #[test]
+    fn ch_asn_mono_cf() {
+        assert_eq!(ch_asn(&["cf"]), (0x10, 0x00));
     }
 }
