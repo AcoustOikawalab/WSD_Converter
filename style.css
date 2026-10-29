@@ -54,13 +54,39 @@ body {
   overflow: visible;
 }
 
-/* 画面スライドアニメーション */
-.slide-left {
-  transform: translateX(-100vw) translateZ(0);
+/* 画面 (メイン / メタデータ / 音声パラメータ)
+   手順の順に並べ、前の画面は左 (is-left)、後の画面は右 (is-right) に置いて
+   横スライドで切り替える。中身は各画面の .container (カード) に入れる */
+.screen {
+  position: fixed;
+  inset: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  visibility: hidden;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    visibility 0s linear 0.4s;
 }
 
-.slide-right {
-  transform: translateX(100vw) translateZ(0);
+.screen.is-active {
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s;
+}
+
+.screen.is-left {
+  transform: translateX(-100vw);
+}
+
+.screen.is-right {
+  transform: translateX(100vw);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen,
+  .screen.is-active {
+    transition: none;
+  }
 }
 
 .site-title {
@@ -715,11 +741,6 @@ body {
 }
 
 /* メタデータ画面専用の設定 */
-#metadataScreen {
-  display: flex;
-  flex-direction: column;
-}
-
 /* チェックボックスとボタンエリア（最上部・固定） */
 #metadataScreen .checkbox-container {
   flex-shrink: 0;
@@ -831,46 +852,6 @@ body {
   flex-shrink: 0;
   flex-wrap: wrap;
 }
-.metadata-screen {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  width: 100vw;
-  height: 100vh;
-  max-width: 100vw;
-  max-height: 100vh;
-  overflow-y: auto;
-  padding: clamp(1rem, 3vh, 3rem);
-  border-radius: 0;
-  z-index: 1000;
-  opacity: 0;
-  visibility: hidden;
-  transition: all 0.3s ease-in-out, visibility 0s linear 0.3s;
-  -webkit-overflow-scrolling: touch;
-  background: #f8fafc;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  box-shadow: none;
-  backdrop-filter: none;
-}
-
-.metadata-screen.show {
-  opacity: 1;
-  visibility: visible;
-  transition: all 0.3s ease-in-out;
-}
-
-.container.slide-left {
-  opacity: 0;
-  transform: translateX(-3vh) scale(0.95);
-  filter: blur(0.2vh);
-  pointer-events: none;
-}
-
 /* チャンネル配置のスタイル */
 .channel-layout-group {
   grid-column: 1 / -1;
@@ -1232,7 +1213,8 @@ body {
   align-items: center;
   gap: clamp(2rem, 4vh, 4rem);
   width: 100%;
-  max-width: clamp(30rem, 60vw, 50rem);
+  /* カードの幅は超えない */
+  max-width: min(100%, clamp(30rem, 60vw, 50rem));
   margin: 0 auto;
 }
 
@@ -1291,4 +1273,28 @@ body {
 
 .nav-home {
   background-image: url("./images/icons_home.png");
+}
+
+/* スマホ幅: カードの余白を詰め、チャンネル配置の図 (ボタン込みで約355px) を縮めて収める */
+@media (max-width: 600px) {
+  .container {
+    width: 94vw;
+    padding: 1rem;
+  }
+
+  .bin-settings-container {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .bin-settings-left,
+  .bin-settings-right {
+    flex: none;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .channel-layout-container {
+    transform: scale(0.8);
+  }
 }

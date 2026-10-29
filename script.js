@@ -647,6 +647,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  // 画面遷移: 手順の順に並べ、表示する画面より前は左、後は右に置いて横スライドさせる
+  const SCREENS = [mainScreen, metadataScreen, audioParamsScreen];
+  function showScreen(target) {
+    const index = SCREENS.indexOf(target);
+    SCREENS.forEach((screen, i) => {
+      screen.classList.toggle("is-left", i < index);
+      screen.classList.toggle("is-active", i === index);
+      screen.classList.toggle("is-right", i > index);
+    });
+    target.scrollTop = 0;
+  }
+
   // 画面遷移ロジック
   processButton.addEventListener("click", async () => {
     if (fileList.length === 0) {
@@ -666,30 +678,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         ? "変換する"
         : "次に進む";
     }
-    window.scrollTo(0, 0);
-    requestAnimationFrame(() => {
-      mainScreen.classList.add("slide-left");
-      setTimeout(() => {
-        metadataScreen.classList.add("show");
-      }, 150);
-      setTimeout(() => {
-        window.scrollTo(0, 0);
-      }, 300);
-    });
+    showScreen(metadataScreen);
   }
 
   function slideToAudioParamsScreen() {
-    window.scrollTo(0, 0);
-    updateAudioParamsSettings(); 
-    requestAnimationFrame(() => {
-      metadataScreen.classList.remove("show");
-      setTimeout(() => {
-        audioParamsScreen.classList.add("show");
-      }, 150);
-      setTimeout(() => {
-        window.scrollTo(0, 0);
-      }, 300);
-    });
+    updateAudioParamsSettings();
+    showScreen(audioParamsScreen);
   }
 
   function updateAudioParamsDisplay() {
@@ -915,43 +909,17 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 戻るボタン処理
   if (backBtnMeta) {
-    backBtnMeta.addEventListener("click", () => {
-      // メタデータ画面 -> メイン画面
-      requestAnimationFrame(() => {
-        metadataScreen.classList.remove("show");
-        setTimeout(() => {
-          mainScreen.classList.remove("slide-left");
-          window.scrollTo(0, 0);
-        }, 300);
-      });
-    });
+    backBtnMeta.addEventListener("click", () => showScreen(mainScreen));
   }
 
   if (backBtnAudio) {
-    backBtnAudio.addEventListener("click", () => {
-      // パラメータ画面 -> メタデータ画面
-      requestAnimationFrame(() => {
-        audioParamsScreen.classList.remove("show");
-        setTimeout(() => {
-          metadataScreen.classList.add("show");
-          window.scrollTo(0, 0);
-        }, 150);
-      });
-    });
+    backBtnAudio.addEventListener("click", () => showScreen(metadataScreen));
   }
 
   // ホームボタン処理（共通）
   function goHome() {
-    requestAnimationFrame(() => {
-      audioParamsScreen.classList.remove("show");
-      metadataScreen.classList.remove("show");
-
-      setTimeout(() => {
-        mainScreen.classList.remove("slide-left");
-        resetFileSelection(); // データをリセット
-        window.scrollTo(0, 0);
-      }, 300);
-    });
+    resetFileSelection(); // データをリセット
+    showScreen(mainScreen);
   }
 
   if (homeBtnMeta) homeBtnMeta.addEventListener("click", goHome);
