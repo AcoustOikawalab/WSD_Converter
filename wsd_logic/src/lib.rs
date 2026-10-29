@@ -496,8 +496,9 @@ fn create_text_data(output: &mut Vec<u8>, metadata: &Metadata) -> Result<(), Str
         (&metadata.comment, 512), (&metadata.user_specific, 512),
     ];
     for (text_opt, max_length) in fields.iter() {
-        let text = text_opt.as_deref().unwrap_or("");
-        let mut field_bytes = text.as_bytes().to_vec();
+        // 仕様書 p.8: Text Data は ASCII (20h〜7Eh) のみ
+        let text = to_wsd_ascii(text_opt.as_deref().unwrap_or(""));
+        let mut field_bytes = text.into_bytes();
         field_bytes.truncate(*max_length);
         field_bytes.resize(*max_length, 0x20);
         output.extend_from_slice(&field_bytes);
@@ -507,8 +508,19 @@ fn create_text_data(output: &mut Vec<u8>, metadata: &Metadata) -> Result<(), Str
     Ok(())
 }
 
+// WSD のテキスト欄に書ける文字 (ASCII 20h〜7Eh) だけを残す。
+// 改行・タブは空白に置き換え、連続する空白は1つにまとめる (先頭の空白も作らない)
+fn to_wsd_ascii(text: &str) -> String {
+    let kept: String = text.chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| (' '..='~').contains(c))
+        .collect();
+    kept.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 // JSへ返すためのメタデータ構造体（読み取り専用）
-#[derive(Serialize)]
+// 値はすべて to_wsd_ascii を通し、WSD の各欄の長さで切ってある
+#[derive(Serialize, Default, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedMetadata {
     pub title: String,
@@ -516,125 +528,313 @@ pub struct ExtractedMetadata {
     pub album: String,
     pub composer: String,
     pub genre: String,
-    pub date_time: String, 
-    pub has_data: bool,    
-}
-
-impl Default for ExtractedMetadata {
-    fn default() -> Self {
-        Self {
-            title: String::new(),
-            artist: String::new(),
-            album: String::new(),
-            composer: String::new(),
-            genre: String::new(),
-            date_time: String::new(),
-            has_data: false,
-        }
-    }
+    pub date_time: String,
+    pub comment: String,
+    pub has_data: bool,
 }
 
 /// ファイルからメタデータを抽出する関数
 #[wasm_bindgen]
 pub fn get_file_metadata_wasm(file_data: &[u8]) -> Result<JsValue, JsValue> {
-    let mut meta = ExtractedMetadata::default();
-
-    if file_data.len() > 4 && &file_data[0..4] == b"DSD " {
-        // DSFファイルの場合、ID3タグを探す
-        // DSD Chunk (28bytes) の offset 20 にメタデータへのポインタがある
-        if file_data.len() >= 28 {
-            let meta_ptr_bytes: [u8; 8] = file_data[20..28].try_into().unwrap();
-            let meta_offset = u64::from_le_bytes(meta_ptr_bytes) as usize;
-
-            if meta_offset > 0 && meta_offset < file_data.len() {
-                // ID3解析を試みる
-                parse_id3_simple(&file_data[meta_offset..], &mut meta);
-            }
-        }
-    }
-    // (ここで拡張可能)
-
-    Ok(serde_wasm_bindgen::to_value(&meta).unwrap())
+    let meta = extract_metadata(file_data);
+    serde_wasm_bindgen::to_value(&meta).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-// 簡易的なID3v2パーサー 
-fn parse_id3_simple(data: &[u8], meta: &mut ExtractedMetadata) {
-    if data.len() < 10 || &data[0..3] != b"ID3" {
-        return;
-    }
+fn extract_metadata(file_data: &[u8]) -> ExtractedMetadata {
+    let mut raw = RawMetadata::default();
 
-    // ID3 Header (10 bytes)
-    // Size is synchsafe integer (bit 7 is ignored)
-    let size_bytes = &data[6..10];
-    let tag_size = ((size_bytes[0] as usize) << 21)
-                 | ((size_bytes[1] as usize) << 14)
-                 | ((size_bytes[2] as usize) << 7)
-                 | (size_bytes[3] as usize);
-    
-    let mut pos = 10;
-    let limit = std::cmp::min(10 + tag_size, data.len());
-
-    while pos < limit {
-        // Frame Header (10 bytes): ID(4) + Size(4) + Flags(2)
-        if pos + 10 > limit { break; }
-        
-        let frame_id = &data[pos..pos+4];
-        if frame_id[0] == 0 { break; } // Padding reached
-
-        // Frame Size (Synchsafe in v2.4, regular integer in v2.3 usually)
-        let fsize = u32::from_be_bytes(data[pos+4..pos+8].try_into().unwrap()) as usize;
-        
-        if pos + 10 + fsize > limit { break; }
-
-        let frame_content = &data[pos+10..pos+10+fsize];
-        
-        // テキストフレームの読み取り (Encoding byte + Text)
-        if fsize > 1 {
-            let encoding = frame_content[0]; // 0=ISO-8859-1, 1=UTF-16BOM, 3=UTF-8
-            let text_bytes = &frame_content[1..];
-            
-            let text = decode_text(encoding, text_bytes);
-
-            match frame_id {
-                b"TIT2" => meta.title = text,    // Title
-                b"TPE1" => meta.artist = text,   // Artist
-                b"TALB" => meta.album = text,    // Album
-                b"TCOM" => meta.composer = text, // Composer
-                b"TCON" => meta.genre = text,    // Genre
-                b"TYER" | b"TDRC" => meta.date_time = text, // Year
-                _ => {}
+    match file_data.get(0..4) {
+        // DSF: DSDチャンクの offset 20 に、末尾の ID3v2 タグへのポインタがある (0 なら無し)
+        Some(b"DSD ") => {
+            if let Some(offset) = read_u64_le(file_data, 20) {
+                let offset = offset as usize;
+                if offset > 0 && offset < file_data.len() {
+                    parse_id3(&file_data[offset..], &mut raw);
+                }
             }
         }
-
-        pos += 10 + fsize;
+        Some(b"FRM8") => parse_dsdiff_metadata(file_data, &mut raw),
+        _ => {}
     }
-    
-    if !meta.title.is_empty() || !meta.artist.is_empty() {
-        meta.has_data = true;
+
+    let fit = |text: &str, max_length: usize| {
+        let mut ascii = to_wsd_ascii(text);
+        ascii.truncate(max_length);
+        ascii.trim_end().to_string()
+    };
+    let mut meta = ExtractedMetadata {
+        title: fit(&raw.title, 128),
+        artist: fit(&raw.artist, 128),
+        album: fit(&raw.album, 128),
+        composer: fit(&raw.composer, 128),
+        genre: fit(&raw.genre, 32),
+        date_time: fit(&raw.date_time, 32),
+        comment: fit(&raw.comment, 512),
+        has_data: false,
+    };
+    meta.has_data = [&meta.title, &meta.artist, &meta.album, &meta.composer,
+                     &meta.genre, &meta.date_time, &meta.comment]
+        .iter().any(|s| !s.is_empty());
+    meta
+}
+
+// 変換前 (ASCII 化・切り詰め前) の値
+#[derive(Default)]
+struct RawMetadata {
+    title: String,
+    artist: String,
+    album: String,
+    composer: String,
+    genre: String,
+    date_time: String,
+    comment: String,
+}
+
+fn set_if_empty(field: &mut String, value: String) {
+    if field.is_empty() && !value.trim().is_empty() {
+        *field = value;
     }
 }
 
-// テキストデコードヘルパー
-fn decode_text(encoding: u8, data: &[u8]) -> String {
-    // 終端のNULLバイトをトリム
-    let clean_data = data.split(|&b| b == 0).next().unwrap_or(data);
-    
+// ---------------------------------------------------------------
+// DSDIFF のメタデータ
+//   DIIN (Edited Master Information) の DITI = タイトル, DIAR = アーティスト
+//   COMT (コメント) のうち種類が General(0) のもの
+//   非公式だが広く使われている 'ID3 ' チャンク (ID3v2 タグ)
+//   ID3 を優先し、空いている欄を DIIN / COMT で埋める
+// ---------------------------------------------------------------
+fn parse_dsdiff_metadata(data: &[u8], raw: &mut RawMetadata) {
+    if data.len() < 16 || &data[12..16] != b"DSD " { return; }
+    let form_size = read_u64_be(data, 4).unwrap();
+    let form_end = 12usize.saturating_add(form_size as usize).min(data.len());
+    let chunks = match iff_chunks(data, 16, form_end) { Ok(c) => c, Err(_) => return };
+
+    for (id, body) in &chunks {
+        if *id == b"ID3 " || *id == b"id3 " {
+            parse_id3(body, raw);
+        }
+    }
+
+    for (id, body) in &chunks {
+        match *id {
+            b"DIIN" => {
+                if let Ok(subs) = iff_chunks(body, 0, body.len()) {
+                    for (sub_id, sub) in subs {
+                        let text = dsdiff_counted_text(sub, 0);
+                        match sub_id {
+                            b"DITI" => set_if_empty(&mut raw.title, text),
+                            b"DIAR" => set_if_empty(&mut raw.artist, text),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            b"COMT" => {
+                // numComments(2) + [年(2) 月 日 時 分(各1) 種類(2) 参照(2) 文字数(4) 本文 (+詰め物)]...
+                let count = read_u16_be(body, 0).unwrap_or(0);
+                let mut pos = 2usize;
+                for _ in 0..count {
+                    let Some(kind) = read_u16_be(body, pos + 6) else { break };
+                    let Some(len) = read_u32_be(body, pos + 10) else { break };
+                    if kind == 0 {
+                        set_if_empty(&mut raw.comment, dsdiff_counted_text(body, pos + 10));
+                    }
+                    pos = pos + 14 + len as usize + (len % 2) as usize;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// DSDIFF のテキスト: 文字数(4, BE) + 本文
+fn dsdiff_counted_text(data: &[u8], pos: usize) -> String {
+    let Some(len) = read_u32_be(data, pos) else { return String::new() };
+    let start = pos + 4;
+    let end = start.saturating_add(len as usize).min(data.len());
+    String::from_utf8_lossy(&data[start..end]).into_owned()
+}
+
+// ---------------------------------------------------------------
+// ID3v2.3 / v2.4 パーサー (v2.2 は未対応)
+// ---------------------------------------------------------------
+fn synchsafe(bytes: &[u8]) -> usize {
+    bytes.iter().fold(0usize, |acc, &b| (acc << 7) | (b & 0x7F) as usize)
+}
+
+// 非同期化 (unsynchronisation) を戻す: FF 00 → FF
+fn remove_unsync(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        out.push(data[i]);
+        if data[i] == 0xFF && data.get(i + 1) == Some(&0x00) { i += 1; }
+        i += 1;
+    }
+    out
+}
+
+fn parse_id3(data: &[u8], raw: &mut RawMetadata) {
+    if data.len() < 10 || &data[0..3] != b"ID3" { return; }
+    let major = data[3];
+    if major != 3 && major != 4 { return; }
+    let flags = data[5];
+    let tag_end = (10 + synchsafe(&data[6..10])).min(data.len());
+
+    let mut body = data[10..tag_end].to_vec();
+    if flags & 0x80 != 0 { body = remove_unsync(&body); }
+
+    let mut pos = 0usize;
+    if flags & 0x40 != 0 {
+        // 拡張ヘッダー: v2.4 はサイズ込み(synchsafe)、v2.3 はサイズ欄(4)を含まない
+        pos = match major {
+            4 => body.get(0..4).map(synchsafe).unwrap_or(body.len()),
+            _ => read_u32_be(&body, 0).map(|s| s as usize + 4).unwrap_or(body.len()),
+        };
+    }
+
+    let (mut tyer, mut tdat, mut time) = (String::new(), String::new(), String::new());
+
+    while pos + 10 <= body.len() {
+        let id = &body[pos..pos + 4];
+        if id[0] == 0 { break; } // パディング
+        let size = match major {
+            4 => synchsafe(&body[pos + 4..pos + 8]),
+            _ => read_u32_be(&body, pos + 4).unwrap() as usize,
+        };
+        let format_flags = body[pos + 9];
+        let start = pos + 10;
+        let end = start.saturating_add(size);
+        if end > body.len() { break; }
+        pos = end;
+
+        let mut content = body[start..end].to_vec();
+        match major {
+            4 => {
+                if format_flags & 0x0C != 0 { continue; } // 圧縮・暗号化は読まない
+                if format_flags & 0x01 != 0 { content = content.get(4..).unwrap_or(&[]).to_vec(); }
+                if format_flags & 0x02 != 0 { content = remove_unsync(&content); }
+            }
+            _ => {
+                if format_flags & 0xC0 != 0 { continue; } // 圧縮・暗号化は読まない
+                if format_flags & 0x20 != 0 { content = content.get(1..).unwrap_or(&[]).to_vec(); }
+            }
+        }
+        if content.is_empty() { continue; }
+
+        let encoding = content[0];
+        let text = || split_id3_text(encoding, &content[1..]).0;
+        match id {
+            b"TIT2" => set_if_empty(&mut raw.title, text()),
+            b"TPE1" => set_if_empty(&mut raw.artist, text()),
+            b"TALB" => set_if_empty(&mut raw.album, text()),
+            b"TCOM" => set_if_empty(&mut raw.composer, text()),
+            b"TCON" => set_if_empty(&mut raw.genre, normalize_genre(&text())),
+            b"TDRC" => set_if_empty(&mut raw.date_time, digits(&text(), 14)),
+            b"TYER" => tyer = digits(&text(), 4),
+            b"TDAT" => tdat = digits(&text(), 4),
+            b"TIME" => time = digits(&text(), 4),
+            b"COMM" => {
+                // 文字コード(1) + 言語(3) + 短い説明(終端あり) + 本文
+                if let Some(rest) = content.get(4..) {
+                    let (_, after_desc) = split_id3_text(encoding, rest);
+                    set_if_empty(&mut raw.comment, split_id3_text(encoding, after_desc).0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // v2.3: TYER(yyyy) + TDAT(DDMM) + TIME(HHMM) → yyyymmddhhmm
+    if raw.date_time.is_empty() && tyer.len() == 4 {
+        let mut date = tyer;
+        if tdat.len() == 4 {
+            date.push_str(&tdat[2..4]);
+            date.push_str(&tdat[0..2]);
+            if time.len() == 4 { date.push_str(&time); }
+        }
+        raw.date_time = date;
+    }
+}
+
+// ID3 のテキストを終端まで読み、(文字列, 終端の後ろ) を返す
+fn split_id3_text(encoding: u8, data: &[u8]) -> (String, &[u8]) {
     match encoding {
-        0 => String::from_utf8_lossy(clean_data).to_string(), // ISO-8859-1 (Latin1) -> 近似的にUTF8扱い
-        1 => {
-            // UTF-16 with BOM
-            if clean_data.len() >= 2 {
-                let u16_vec: Vec<u16> = clean_data
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]])) 
-                    .collect();
-                String::from_utf16_lossy(&u16_vec)
-            } else { String::new() }
-        },
-        3 => String::from_utf8_lossy(clean_data).to_string(), // UTF-8
-        _ => String::from_utf8_lossy(clean_data).to_string(),
+        1 | 2 => {
+            // UTF-16: 終端は偶数位置の 00 00
+            let end = (0..data.len() / 2)
+                .find(|&i| data[2 * i] == 0 && data[2 * i + 1] == 0)
+                .map(|i| 2 * i);
+            let (text, rest) = match end {
+                Some(e) => (&data[..e], &data[e + 2..]),
+                None => (data, &data[data.len()..]),
+            };
+            let (big_endian, text) = match text {
+                [0xFE, 0xFF, rest @ ..] => (true, rest),
+                [0xFF, 0xFE, rest @ ..] => (false, rest),
+                _ => (encoding == 2, text), // BOM なし: UTF-16BE (v2.4 の 2) とみなす
+            };
+            let units: Vec<u16> = text.chunks_exact(2)
+                .map(|c| if big_endian { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_le_bytes([c[0], c[1]]) })
+                .collect();
+            (String::from_utf16_lossy(&units), rest)
+        }
+        _ => {
+            let end = data.iter().position(|&b| b == 0);
+            let (text, rest) = match end {
+                Some(e) => (&data[..e], &data[e + 1..]),
+                None => (data, &data[data.len()..]),
+            };
+            let s = if encoding == 3 {
+                String::from_utf8_lossy(text).into_owned()
+            } else {
+                text.iter().map(|&b| b as char).collect() // ISO-8859-1
+            };
+            (s, rest)
+        }
     }
 }
+
+fn digits(text: &str, max: usize) -> String {
+    text.chars().filter(|c| c.is_ascii_digit()).take(max).collect()
+}
+
+// TCON の "(13)" "13" "(13)Pop" "(RX)" などを名前にする
+fn normalize_genre(text: &str) -> String {
+    const ID3V1_GENRES: [&str; 80] = [
+        "Blues", "Classic Rock", "Country", "Dance", "Disco", "Funk", "Grunge", "Hip-Hop",
+        "Jazz", "Metal", "New Age", "Oldies", "Other", "Pop", "R&B", "Rap", "Reggae", "Rock",
+        "Techno", "Industrial", "Alternative", "Ska", "Death Metal", "Pranks", "Soundtrack",
+        "Euro-Techno", "Ambient", "Trip-Hop", "Vocal", "Jazz+Funk", "Fusion", "Trance",
+        "Classical", "Instrumental", "Acid", "House", "Game", "Sound Clip", "Gospel", "Noise",
+        "AlternRock", "Bass", "Soul", "Punk", "Space", "Meditative", "Instrumental Pop",
+        "Instrumental Rock", "Ethnic", "Gothic", "Darkwave", "Techno-Industrial", "Electronic",
+        "Pop-Folk", "Eurodance", "Dream", "Southern Rock", "Comedy", "Cult", "Gangsta", "Top 40",
+        "Christian Rap", "Pop/Funk", "Jungle", "Native American", "Cabaret", "New Wave",
+        "Psychadelic", "Rave", "Showtunes", "Trailer", "Lo-Fi", "Tribal", "Acid Punk",
+        "Acid Jazz", "Polka", "Retro", "Musical", "Rock & Roll", "Hard Rock",
+    ];
+    let lookup = |code: &str| -> Option<String> {
+        match code {
+            "RX" => Some("Remix".to_string()),
+            "CR" => Some("Cover".to_string()),
+            _ => code.parse::<usize>().ok()
+                .and_then(|n| ID3V1_GENRES.get(n))
+                .map(|s| s.to_string()),
+        }
+    };
+
+    let text = text.trim();
+    if let Some(inner) = text.strip_prefix('(') {
+        if let Some(close) = inner.find(')') {
+            let after = inner[close + 1..].trim();
+            if !after.is_empty() { return after.to_string(); }
+            if let Some(name) = lookup(&inner[..close]) { return name; }
+        }
+    }
+    lookup(text).unwrap_or_else(|| text.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,6 +988,11 @@ mod tests {
 
     // 仕様どおりの構成: FVER, PROP(SND : FS, CHNL, CMPR), COMT, DSD, DIIN
     fn dsdiff_file(ids: &[&[u8; 4]], compression: &[u8; 4], audio: &[u8]) -> Vec<u8> {
+        dsdiff_file_with(ids, compression, audio, &[])
+    }
+
+    // extra: 音声チャンクの後ろに足すチャンク列
+    fn dsdiff_file_with(ids: &[&[u8; 4]], compression: &[u8; 4], audio: &[u8], extra: &[u8]) -> Vec<u8> {
         let mut chnl = (ids.len() as u16).to_be_bytes().to_vec();
         for id in ids { chnl.extend_from_slice(*id); }
         let mut cmpr = compression.to_vec();
@@ -805,6 +1010,7 @@ mod tests {
         body.extend(iff_chunk(b"COMT", b"odd")); // 奇数サイズ
         body.extend(iff_chunk(compression, audio));
         body.extend(iff_chunk(b"DIIN", &iff_chunk(b"DITI", b"\x00\x00\x00\x04abcd")));
+        body.extend_from_slice(extra);
 
         let mut f = b"FRM8".to_vec();
         f.extend_from_slice(&(body.len() as u64).to_be_bytes());
@@ -840,5 +1046,159 @@ mod tests {
         let ids: [&[u8; 4]; 2] = [b"SLFT", b"SRGT"];
         let err = convert_dsdiff(&dsdiff_file(&ids, b"DST ", &[0; 4])).unwrap_err();
         assert!(err.contains("DST"), "{}", err);
+    }
+
+    #[test]
+    fn ascii_only_text() {
+        assert_eq!(to_wsd_ascii("夜に駆ける (Live)"), "(Live)");
+        assert_eq!(to_wsd_ascii("  Hello\nWorld  x "), "Hello World x");
+        assert_eq!(to_wsd_ascii("Café"), "Caf");
+    }
+
+    // 書き込み時も ASCII 以外を取り除く (マルチバイト文字の途中で切れない)
+    #[test]
+    fn text_data_is_ascii() {
+        let metadata = Metadata { title: Some("A日本B".to_string()), ..Default::default() };
+        let params = AudioParams {
+            sampling_frequency: Some(2_822_400), channel_count: Some(1),
+            channel_layout: Some(vec!["cf".to_string()]), ..Default::default()
+        };
+        let wsd = create_wsd_file(&[0; 2], &metadata, &params).unwrap();
+        assert_eq!(&wsd[128..131], b"AB ");
+        assert!(wsd[128..2048].iter().all(|b| (0x20..=0x7E).contains(b)));
+    }
+
+    // ID3v2 タグを組み立てる
+    fn id3_tag(major: u8, frames: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let to_synchsafe = |n: usize| [(n >> 21) as u8 & 0x7F, (n >> 14) as u8 & 0x7F, (n >> 7) as u8 & 0x7F, n as u8 & 0x7F];
+        let mut body = Vec::new();
+        for (id, content) in frames {
+            body.extend_from_slice(*id);
+            if major == 4 {
+                body.extend_from_slice(&to_synchsafe(content.len()));
+            } else {
+                body.extend_from_slice(&(content.len() as u32).to_be_bytes());
+            }
+            body.extend_from_slice(&[0, 0]);
+            body.extend_from_slice(content);
+        }
+        body.extend_from_slice(&[0; 16]); // パディング
+        let mut tag = vec![b'I', b'D', b'3', major, 0, 0];
+        tag.extend_from_slice(&to_synchsafe(body.len()));
+        tag.extend(body);
+        tag
+    }
+
+    fn latin1(text: &str) -> Vec<u8> {
+        let mut v = vec![0];
+        v.extend(text.chars().map(|c| c as u8));
+        v
+    }
+    fn utf16(text: &str, big_endian: bool) -> Vec<u8> {
+        let mut v = vec![1];
+        v.extend_from_slice(if big_endian { &[0xFE, 0xFF] } else { &[0xFF, 0xFE] });
+        for u in text.encode_utf16() {
+            v.extend_from_slice(&if big_endian { u.to_be_bytes() } else { u.to_le_bytes() });
+        }
+        v
+    }
+
+    fn dsf_with_id3(tag: &[u8]) -> Vec<u8> {
+        let mut f = dsf_file(2, 1, 4096, 16, &[vec![0; 2], vec![0; 2]]);
+        f.truncate(f.len() - 10); // ダミーの ID3 を外す
+        let offset = f.len() as u64;
+        f[20..28].copy_from_slice(&offset.to_le_bytes());
+        f.extend_from_slice(tag);
+        f
+    }
+
+    // DSF + ID3v2.3: 文字コード (Latin-1, UTF-16 LE/BE)、ジャンル番号、TYER+TDAT、COMM
+    #[test]
+    fn dsf_id3v23_metadata() {
+        let mut comm = vec![0];
+        comm.extend_from_slice(b"eng\x00Recorded live");
+        let tag = id3_tag(3, &[
+            (b"TIT2", utf16("夜に駆ける (Live)", false)),
+            (b"TPE1", utf16("YOASOBI", true)),
+            (b"TALB", latin1("THE BOOK")),
+            (b"TCON", latin1("(13)")),
+            (b"TYER", latin1("2021")),
+            (b"TDAT", latin1("0601")),
+            (b"COMM", comm),
+        ]);
+        let meta = extract_metadata(&dsf_with_id3(&tag));
+        assert_eq!(meta.title, "(Live)");
+        assert_eq!(meta.artist, "YOASOBI");
+        assert_eq!(meta.album, "THE BOOK");
+        assert_eq!(meta.genre, "Pop");
+        assert_eq!(meta.date_time, "20210106");
+        assert_eq!(meta.comment, "Recorded live");
+        assert!(meta.has_data);
+    }
+
+    // ID3v2.4: フレームサイズは synchsafe。128文字を超えるタイトルは切り詰める
+    #[test]
+    fn dsf_id3v24_long_title() {
+        let mut title = vec![3]; // UTF-8
+        title.extend(std::iter::repeat(b'a').take(200));
+        let tag = id3_tag(4, &[
+            (b"TIT2", title),
+            (b"TDRC", latin1("2012-03-04T05:06:07")),
+            (b"TPE1", latin1("Artist")),
+        ]);
+        let meta = extract_metadata(&dsf_with_id3(&tag));
+        assert_eq!(meta.title, "a".repeat(128));
+        assert_eq!(meta.date_time, "20120304050607");
+        assert_eq!(meta.artist, "Artist");
+    }
+
+    // タグなし
+    #[test]
+    fn dsf_without_metadata() {
+        let meta = extract_metadata(&dsf_file(2, 1, 4096, 16, &[vec![0; 2], vec![0; 2]]));
+        assert_eq!(meta, ExtractedMetadata::default());
+    }
+
+    fn comt(text: &str, kind: u16) -> Vec<u8> {
+        let mut body = 1u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&[0x07, 0xE5, 6, 1, 12, 0]); // 2021-06-01 12:00
+        body.extend_from_slice(&kind.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        body.extend_from_slice(text.as_bytes());
+        if text.len() % 2 == 1 { body.push(0); }
+        iff_chunk(b"COMT", &body)
+    }
+
+    // DSDIFF: DIIN の DITI (タイトル)、DIAR (アーティスト)、COMT (コメント)
+    #[test]
+    fn dsdiff_diin_and_comt_metadata() {
+        let mut diin = iff_chunk(b"DIAR", b"\x00\x00\x00\x06Artist");
+        diin.extend(iff_chunk(b"DITI", b"\x00\x00\x00\x05Title"));
+        let mut extra = iff_chunk(b"DIIN", &diin);
+        extra.extend(comt("A comment", 0));
+
+        let ids: [&[u8; 4]; 2] = [b"SLFT", b"SRGT"];
+        let file = dsdiff_file_with(&ids, b"DSD ", &[1, 2], &extra);
+        let meta = extract_metadata(&file);
+        // 先にある DIIN (DITI = "abcd") が使われる
+        assert_eq!(meta.title, "abcd");
+        assert_eq!(meta.artist, "Artist");
+        assert_eq!(meta.comment, "A comment");
+
+        // メタデータのチャンクは音声に入らない
+        let (data, _) = convert_dsdiff(&file).unwrap();
+        assert_eq!(data, vec![1, 2]);
+    }
+
+    // DSDIFF: ID3 チャンクがあれば DIIN より優先する
+    #[test]
+    fn dsdiff_id3_chunk_takes_priority() {
+        let tag = id3_tag(3, &[(b"TIT2", latin1("From ID3")), (b"TALB", latin1("Album"))]);
+        let extra = iff_chunk(b"ID3 ", &tag);
+        let ids: [&[u8; 4]; 2] = [b"SLFT", b"SRGT"];
+        let meta = extract_metadata(&dsdiff_file_with(&ids, b"DSD ", &[1, 2], &extra));
+        assert_eq!(meta.title, "From ID3");
+        assert_eq!(meta.album, "Album");
     }
 }

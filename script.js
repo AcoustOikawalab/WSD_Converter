@@ -86,6 +86,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   let fileList = [];
   let selectedFile = null;
   let currentTab = "bin";
+  // メタデータを読み込んだファイル (同じファイルなら読み直さず、ユーザーの修正を残す)
+  let metadataSourceFile = null;
 
   // ファイルごとのチャンネル割り当て管理
   const fileChannelMap = new Map();
@@ -126,7 +128,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     },
     "audio-high": {
       title: "DSD音源について",
-      text: "DSF / DSDIFFをWSDに変換するモードです。\n\nファイルのヘッダーを解析し、1bitデータ部分のみを抽出してWSD化します。\nメタデータは自動取得されるため、手動設定は不要です。",
+      text: "DSF / DSDIFFをWSDに変換するモードです。\n\nファイルのヘッダーを解析し、1bitデータを WSD の並びに組み直して WSD化します。\nファイル内のメタデータ (ID3 タグなど) は次の画面に読み込まれるので、確認・修正してから変換できます。\n※WSD のテキストは英数字 (ASCII) のみのため、日本語などの文字は取り除かれます。",
     },
     "audio-common": {
       title: "PCM音源について",
@@ -221,12 +223,6 @@ document.addEventListener("DOMContentLoaded", async () => {
           updateTabSlider();
           updateFileAccept();
           resetFileSelection();
-
-          if (currentTab === "audio-high") {
-            processButton.textContent = "処理を開始";
-          } else {
-            processButton.textContent = "次に進む";
-          }
         });
       },
       { passive: true }
@@ -266,6 +262,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     fileList = [];
     fileChannelMap.clear();
     selectedFile = null;
+    metadataSourceFile = null;
     audioFileInput.value = "";
     renderFileList(); // UI更新
     processButton.disabled = true;
@@ -575,40 +572,45 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // Rustを使ってファイルのメタデータを抽出し、画面に反映する
+  // (値は Rust 側で ASCII 化・各欄の長さで切り詰め済み)
   async function extractAndFillMetadata(file) {
-    if (!file) return;
+    if (!file || file === metadataSourceFile) return;
 
     const ext = "." + file.name.split(".").pop().toLowerCase();
     if (![".dsf", ".dff"].includes(ext)) return;
+    metadataSourceFile = file;
+
+    // 前のファイルの値を残さない
+    metadataInputs.forEach((input) => {
+      input.value = "";
+      input.classList.remove("input-warning");
+    });
+    metadataStatusMessage.textContent = "";
 
     try {
-      // 読み込み
       const buffer = new Uint8Array(await file.arrayBuffer());
-
       const meta = get_file_metadata_wasm(buffer);
+      if (!meta || !meta.hasData) return;
 
-      if (meta && meta.hasData) {
-        console.log("メタデータ抽出成功:", meta);
-
-        // 画面のフィールドに値をセット
-        if (meta.title) document.getElementById("title").value = meta.title;
-        if (meta.artist) document.getElementById("artist").value = meta.artist;
-        if (meta.album) document.getElementById("album").value = meta.album;
-        if (meta.composer)
-          document.getElementById("composer").value = meta.composer;
-        if (meta.genre) document.getElementById("genre").value = meta.genre;
-        if (meta.dateTime)
-          document.getElementById("recordDate").value = meta.dateTime;
-
-        // 「情報を入力しない」チェックを外す
-        skipMetadata.checked = false;
-        metadataInputs.forEach((input) => {
-          input.disabled = false;
-          input.classList.remove("input-warning");
-        });
-
-        statusMessage.textContent = "ファイルからメタデータを読み込みました。";
+      const fieldMap = {
+        title: "title",
+        artist: "artist",
+        album: "album",
+        composer: "composer",
+        genre: "genre",
+        dateTime: "recordDate",
+        comment: "comment",
+      };
+      for (const [key, id] of Object.entries(fieldMap)) {
+        if (meta[key]) document.getElementById(id).value = meta[key];
       }
+
+      // 「情報を入力しない」チェックを外す
+      skipMetadata.checked = false;
+      metadataInputs.forEach((input) => (input.disabled = false));
+
+      metadataStatusMessage.textContent =
+        "ファイルからメタデータを読み込みました。英数字以外の文字は取り除かれています。";
     } catch (e) {
       console.warn("メタデータ抽出失敗:", e);
       // 失敗しても止まらず、空欄のまま進む
@@ -652,44 +654,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // DSDモードの場合は画面遷移せずに即時実行
-    if (currentTab === "audio-high") {
-      await processDsdImmediately();
-    } else {
-      slideToMetadataScreen();
-    }
+    slideToMetadataScreen();
   });
-
-  async function processDsdImmediately() {
-    processButton.disabled = true;
-    statusMessage.textContent = "処理中です...";
-    downloadLink.style.display = "none";
-
-    try {
-      const file = fileList[0];
-      const buffer = new Uint8Array(await file.arrayBuffer());
-
-      // パラメータ・メタデータは空でRustに任せる（DSDはヘッダーから自動解析される）
-      const metadataStr = JSON.stringify({});
-      const paramsStr = JSON.stringify({});
-
-      const resultBytes = process_audio_wasm(buffer, metadataStr, paramsStr);
-
-      downloadResult(resultBytes, downloadLink, file.name);
-
-      statusMessage.textContent = "処理完了！";
-    } catch (e) {
-      console.error(e);
-      const errorMsg = typeof e === "string" ? e : e.message;
-      statusMessage.textContent = "エラー: " + errorMsg;
-    } finally {
-      processButton.disabled = false;
-    }
-  }
 
   async function slideToMetadataScreen() {
     if (selectedFile) {
       await extractAndFillMetadata(selectedFile);
+      // DSD はこの画面で変換まで行う
+      const ext = "." + selectedFile.name.split(".").pop().toLowerCase();
+      processWithMetadata.textContent = [".dsf", ".dff"].includes(ext)
+        ? "変換する"
+        : "次に進む";
     }
     window.scrollTo(0, 0);
     requestAnimationFrame(() => {
@@ -900,7 +875,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       downloadResult(resultBytes, metadataDownloadLink, selectedFile.name);
 
-      metadataStatusMessage.textContent = "Rustによる処理が完了しました！";
+      metadataStatusMessage.textContent = "処理完了！";
     } catch (error) {
       console.error("Processing error:", error);
       metadataStatusMessage.textContent = "エラーが発生しました: " + error;
@@ -922,7 +897,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     lyricist: 128,
     artist: 128,
     album: 128,
-    recordDate: 128,
+    recordDate: 32,
   };
 
   metadataInputs.forEach((input) => {
