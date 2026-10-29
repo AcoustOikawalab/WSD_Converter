@@ -2,11 +2,16 @@ use wasm_bindgen::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::str;
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
 }
+
+// cargo test (ネイティブ実行) では console が無いので何もしない
+#[cfg(not(target_arch = "wasm32"))]
+fn log(_s: &str) {}
 
 // メタデータ 
 #[derive(Deserialize, Serialize, Debug, Default)]
@@ -54,7 +59,7 @@ pub fn process_audio_wasm(
     let input_file_count = params.input_file_count.unwrap_or(1);
     
     // 2. メインロジック分岐
-    let (interleaved_data, final_params) = if input_file_count > 1 {
+    let (mut interleaved_data, final_params) = if input_file_count > 1 {
         // Case A: 複数モノラルファイル
         handle_multi_mono_files(file_data, &params)?
     } else {
@@ -62,11 +67,35 @@ pub fn process_audio_wasm(
         handle_single_file(file_data, &params)?
     };
 
-    // 3. WSDファイル生成
+    // 3. サイクル総数を偶数にそろえる (仕様書 p.10)
+    if let Some(ch) = final_params.channel_count {
+        pad_to_even_cycles(&mut interleaved_data, ch as usize);
+    }
+
+    // 4. WSDファイル生成
     let wsd_data = create_wsd_file(&interleaved_data, &metadata, &final_params)
         .map_err(|e| JsValue::from_str(&e))?;
 
     Ok(wsd_data)
+}
+
+// 1bit の無音パターン (0 と 1 が均等)
+const SILENCE_BYTE: u8 = 0x69;
+
+// WSD の Stream Data 上のチャンネル順 (Ch_Asn の RBP48 MSB → RBP51 LSB)
+const WSD_ORDER: [&str; 11] = [
+    "lf", "lf-middle", "cf", "rf-middle", "rf", "lfe",
+    "lr", "lr-middle", "cr", "rr-middle", "rr",
+];
+
+// サイクル(全チャンネル1バイトずつ)の総数が奇数なら、無音を1サイクル足す
+fn pad_to_even_cycles(data: &mut Vec<u8>, channel_count: usize) {
+    if channel_count == 0 || data.len() % channel_count != 0 {
+        return;
+    }
+    if (data.len() / channel_count) % 2 == 1 {
+        data.extend(std::iter::repeat(SILENCE_BYTE).take(channel_count));
+    }
 }
 
 // Case A: マルチモノラルファイル処理
@@ -127,8 +156,8 @@ fn handle_single_file(
             Ok((dsd_data.to_vec(), detected_params))
         },
         b"FRM8" => {
-            let (dsd_data, detected_params) = parse_dsdiff_header(file_data)?;
-            Ok((dsd_data.to_vec(), detected_params))
+            let (dsd_data, detected_params, source_layout) = parse_dsdiff_header(file_data)?;
+            Ok((reorder_to_wsd(dsd_data, &source_layout), detected_params))
         },
         b"RIFF" => Err(JsValue::from_str("WAVファイルは非対応です")),
         _ => {
@@ -145,9 +174,19 @@ fn handle_single_file(
 fn parse_dsf_header(data: &[u8]) -> Result<(&[u8], AudioParams), JsValue> {
     if data.len() < 92 { return Err(JsValue::from_str("DSFファイルエラー")); }
     
+    let ch_type_bytes: [u8; 4] = data[48..52].try_into().unwrap();
+    let channel_type = u32::from_le_bytes(ch_type_bytes);
+
     let ch_num_bytes: [u8; 4] = data[52..56].try_into().unwrap();
     let channel_count = u32::from_le_bytes(ch_num_bytes) as u8;
-    
+
+    let channel_layout = dsf_channel_layout(channel_type)
+        .filter(|layout| layout.len() == channel_count as usize)
+        .or_else(|| create_default_channel_layout(channel_count))
+        .ok_or_else(|| JsValue::from_str(&format!(
+            "DSF: 未対応のチャンネル構成です (Channel Type: {}, {}ch)", channel_type, channel_count
+        )))?;
+
     let fs_bytes: [u8; 4] = data[56..60].try_into().unwrap();
     let sampling_rate = u32::from_le_bytes(fs_bytes);
     
@@ -157,14 +196,61 @@ fn parse_dsf_header(data: &[u8]) -> Result<(&[u8], AudioParams), JsValue> {
     let mut params = AudioParams::default();
     params.sampling_frequency = Some(sampling_rate);
     params.channel_count = Some(channel_count);
-    params.channel_layout = create_default_channel_layout(channel_count);
-    
+    params.channel_layout = Some(channel_layout);
+
     if data_pos >= data.len() { return Err(JsValue::from_str("データ位置異常")); }
     Ok((&data[data_pos..], params))
 }
 
+// DSF の Channel Type → WSD のチャンネル名 (DSF 上の並び順)
+fn dsf_channel_layout(channel_type: u32) -> Option<Vec<String>> {
+    let layout: &[&str] = match channel_type {
+        1 => &["cf"],
+        2 => &["lf", "rf"],
+        3 => &["lf", "rf", "cf"],
+        4 => &["lf", "rf", "lr", "rr"],
+        5 => &["lf", "rf", "cf", "lfe"],
+        6 => &["lf", "rf", "cf", "lr", "rr"],
+        7 => &["lf", "rf", "cf", "lfe", "lr", "rr"],
+        _ => return None,
+    };
+    Some(layout.iter().map(|s| s.to_string()).collect())
+}
+
+// DSDIFF の CHNL チャンネルID → WSD のチャンネル名
+fn dsdiff_channel_name(id: &[u8]) -> Option<&'static str> {
+    match id {
+        b"SLFT" | b"MLFT" => Some("lf"),
+        b"SRGT" | b"MRGT" => Some("rf"),
+        b"C   " => Some("cf"),
+        b"LFE " => Some("lfe"),
+        b"LS  " => Some("lr"),
+        b"RS  " => Some("rr"),
+        _ => None,
+    }
+}
+
+// バイトインターリーブされたデータを WSD_ORDER の並びに入れ替える
+fn reorder_to_wsd(data: &[u8], source_layout: &[String]) -> Vec<u8> {
+    let channel_count = source_layout.len();
+    let order: Vec<usize> = WSD_ORDER.iter()
+        .filter_map(|ch| source_layout.iter().position(|s| s == ch))
+        .collect();
+
+    if channel_count == 0 || order.iter().enumerate().all(|(i, &src)| i == src) {
+        return data.to_vec();
+    }
+
+    let mut result = Vec::with_capacity(data.len());
+    for cycle in data.chunks_exact(channel_count) {
+        result.extend(order.iter().map(|&src| cycle[src]));
+    }
+    result
+}
+
 /// DSDIFFヘッダー解析（完全版）
-fn parse_dsdiff_header(data: &[u8]) -> Result<(&[u8], AudioParams), JsValue> {
+/// 戻り値の3つ目はデータ上のチャンネルの並び (WSD のチャンネル名)
+fn parse_dsdiff_header(data: &[u8]) -> Result<(&[u8], AudioParams, Vec<String>), JsValue> {
     if data.len() < 28 {
         return Err(JsValue::from_str("DSDIFFファイルが短すぎます"));
     }
@@ -190,27 +276,48 @@ fn parse_dsdiff_header(data: &[u8]) -> Result<(&[u8], AudioParams), JsValue> {
     if num_ch_pos + 2 > data.len() { return Err(JsValue::from_str("DSDIFF: CHNLチャンク破損")); }
     let channel_count = u16::from_be_bytes(data[num_ch_pos..num_ch_pos+2].try_into().unwrap()) as u8;
 
+    // CHNL のチャンネルIDを読み、WSD のチャンネル名に変換する
+    let ids_start = num_ch_pos + 2;
+    let ids_end = ids_start + 4 * channel_count as usize;
+    if ids_end > data.len() { return Err(JsValue::from_str("DSDIFF: CHNLチャンク破損")); }
+    let mapped: Option<Vec<String>> = data[ids_start..ids_end]
+        .chunks_exact(4)
+        .map(|id| dsdiff_channel_name(id).map(|s| s.to_string()))
+        .collect();
+    let has_duplicate = |layout: &Vec<String>| {
+        layout.iter().enumerate().any(|(i, ch)| layout[..i].contains(ch))
+    };
+    let source_layout = mapped
+        .filter(|layout| !has_duplicate(layout))
+        .or_else(|| create_default_channel_layout(channel_count))
+        .ok_or_else(|| JsValue::from_str(&format!(
+            "DSDIFF: 未対応のチャンネル構成です ({}ch)", channel_count
+        )))?;
+
     // 3. DSD (audio data) を探す ('DSD ' chunk)
-    let dsd_data_start = data.windows(4).enumerate()
+    let dsd_chunk_pos = data.windows(4).enumerate()
         .filter(|(_, w)| *w == b"DSD ")
         .map(|(i, _)| i)
         .find(|&i| i > 12) // 先頭のID以外を探す
-        .map(|i| i + 12); // ID(4)+Size(8)=12
+        .ok_or_else(|| JsValue::from_str("DSDIFF: 音声データ(DSD)チャンクが見つかりません"))?;
 
-    let data_start = dsd_data_start.ok_or_else(|| JsValue::from_str("DSDIFF: 音声データ(DSD)チャンクが見つかりません"))?;
-
+    let data_start = dsd_chunk_pos + 12; // ID(4)+Size(8)=12
     if data_start >= data.len() {
         return Err(JsValue::from_str("DSDIFF: データ開始位置異常"));
     }
+
+    // チャンクサイズの分だけ取り出す (後続の DIIN や ID3 チャンクを含めない)
+    let chunk_size = u64::from_be_bytes(data[dsd_chunk_pos+4..data_start].try_into().unwrap());
+    let data_end = data_start.saturating_add(chunk_size as usize).min(data.len());
 
     log(&format!("DSDIFF解析成功: {}Hz, {}ch", sampling_rate, channel_count));
 
     let mut params = AudioParams::default();
     params.sampling_frequency = Some(sampling_rate);
     params.channel_count = Some(channel_count);
-    params.channel_layout = create_default_channel_layout(channel_count);
+    params.channel_layout = Some(source_layout.clone());
 
-    Ok((&data[data_start..], params))
+    Ok((&data[data_start..data_end], params, source_layout))
 }
 
 // デフォルト配置 (配列版)
@@ -480,5 +587,94 @@ mod tests {
     #[test]
     fn ch_asn_mono_cf() {
         assert_eq!(ch_asn(&["cf"]), (0x10, 0x00));
+    }
+
+    // 仕様書 p.10: サイクル総数は偶数
+    #[test]
+    fn pad_odd_cycles_with_silence() {
+        let mut data = vec![1, 2, 3, 4, 5, 6]; // 2ch × 3サイクル
+        pad_to_even_cycles(&mut data, 2);
+        assert_eq!(data, vec![1, 2, 3, 4, 5, 6, 0x69, 0x69]);
+    }
+
+    #[test]
+    fn keep_even_cycles() {
+        let mut data = vec![1, 2, 3, 4]; // 2ch × 2サイクル
+        pad_to_even_cycles(&mut data, 2);
+        assert_eq!(data, vec![1, 2, 3, 4]);
+    }
+
+    fn dsf_file(channel_type: u32, channel_count: u32) -> Vec<u8> {
+        let mut f = vec![0u8; 92];
+        f[0..4].copy_from_slice(b"DSD ");
+        f[28..32].copy_from_slice(b"fmt ");
+        f[48..52].copy_from_slice(&channel_type.to_le_bytes());
+        f[52..56].copy_from_slice(&channel_count.to_le_bytes());
+        f[56..60].copy_from_slice(&2_822_400u32.to_le_bytes());
+        f[80..84].copy_from_slice(b"data");
+        f.extend_from_slice(&vec![0u8; 4096 * channel_count as usize]);
+        f
+    }
+
+    fn wsd_from(file: &[u8]) -> Vec<u8> {
+        let (mut data, params) = handle_single_file(file, &AudioParams::default()).unwrap();
+        pad_to_even_cycles(&mut data, params.channel_count.unwrap() as usize);
+        create_wsd_file(&data, &Metadata::default(), &params).unwrap()
+    }
+
+    // DSF 5.1ch (Channel Type 7) は RBP48=55h, RBP51=44h
+    #[test]
+    fn dsf_5_1_sets_ch_asn() {
+        let wsd = wsd_from(&dsf_file(7, 6));
+        assert_eq!((wsd[44], wsd[48], wsd[51]), (6, 0x55, 0x44));
+    }
+
+    // DSF 3ch (Channel Type 3: L, R, C)
+    #[test]
+    fn dsf_3ch_sets_ch_asn() {
+        let wsd = wsd_from(&dsf_file(3, 3));
+        assert_eq!((wsd[44], wsd[48], wsd[51]), (3, 0x54, 0x00));
+    }
+
+    fn dsdiff_file(ids: &[&[u8; 4]], audio: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(b"FRM8");
+        f.extend_from_slice(&0u64.to_be_bytes());
+        f.extend_from_slice(b"DSD ");
+        f.extend_from_slice(b"FS  ");
+        f.extend_from_slice(&4u64.to_be_bytes());
+        f.extend_from_slice(&2_822_400u32.to_be_bytes());
+        f.extend_from_slice(b"CHNL");
+        f.extend_from_slice(&(2 + 4 * ids.len() as u64).to_be_bytes());
+        f.extend_from_slice(&(ids.len() as u16).to_be_bytes());
+        for id in ids { f.extend_from_slice(*id); }
+        f.extend_from_slice(b"DSD ");
+        f.extend_from_slice(&(audio.len() as u64).to_be_bytes());
+        f.extend_from_slice(audio);
+        f.extend_from_slice(b"DIIN"); // 後続チャンク (音声データに含めない)
+        f.extend_from_slice(&4u64.to_be_bytes());
+        f.extend_from_slice(b"xxxx");
+        f
+    }
+
+    // DSDIFF 5.1ch: MLFT MRGT C LFE LS RS → WSD 順 Lf Cf Rf LFE Lr Rr に並べ替える
+    #[test]
+    fn dsdiff_5_1_reorders_to_wsd() {
+        let ids: [&[u8; 4]; 6] = [b"MLFT", b"MRGT", b"C   ", b"LFE ", b"LS  ", b"RS  "];
+        let audio = [1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16];
+        let (data, params) = handle_single_file(&dsdiff_file(&ids, &audio), &AudioParams::default()).unwrap();
+        assert_eq!(data, vec![1, 3, 2, 4, 5, 6, 11, 13, 12, 14, 15, 16]);
+
+        let wsd = create_wsd_file(&data, &Metadata::default(), &params).unwrap();
+        assert_eq!((wsd[44], wsd[48], wsd[51]), (6, 0x55, 0x44));
+    }
+
+    // DSDIFF ステレオ: 並べ替えなし、後続チャンクは含めない、奇数サイクルは無音で埋める
+    #[test]
+    fn dsdiff_stereo() {
+        let ids: [&[u8; 4]; 2] = [b"SLFT", b"SRGT"];
+        let wsd = wsd_from(&dsdiff_file(&ids, &[1, 2, 3, 4, 5, 6]));
+        assert_eq!((wsd[44], wsd[48], wsd[51]), (2, 0x44, 0x00));
+        assert_eq!(&wsd[2048..], &[1, 2, 3, 4, 5, 6, 0x69, 0x69]);
     }
 }
